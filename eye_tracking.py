@@ -31,7 +31,7 @@ class EyeTracker:
         self.blink_threshold = 0.20
         self.short_blink_min = 0.05
         self.long_blink_threshold = 0.7
-        self.click_debounce = 0.35
+        self.click_debounce = 0.80
         self.double_blink_window = 0.45
         self.sensitivity_x = 2.5
         self.sensitivity_y = 2.0
