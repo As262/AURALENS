@@ -23,36 +23,74 @@ if not HAS_SOLUTIONS:
 
 
 class EyeTracker:
-    def __init__(self):
+    def __init__(self, shared_x=None, shared_y=None, shared_click_state=None):
         self.max_fps = 60
         self.process_every = 1
-        self.smoothing = 0.08
-        self.cursor_update_interval = 0.025
-        self.blink_threshold = 0.20
+        self.smoothing = 0.10  # Slightly less smoothing for stability
+        self.cursor_update_interval = 0.012
+        # Blink detection - tuned thresholds
+        self.blink_threshold = 0.23
         self.short_blink_min = 0.05
-        self.long_blink_threshold = 0.7
-        self.click_debounce = 0.80
-        self.double_blink_window = 0.45
-        self.sensitivity_x = 2.5
-        self.sensitivity_y = 2.0
-        self.head_weight = 0.7
-        self.iris_weight = 0.3
+        self.long_blink_threshold = 0.55
+        self.click_debounce = 0.3
+        self.double_blink_window = 0.55
+        # IMPORTANT: Freeze cursor during blink AND for a period after
+        self.blink_freeze_duration = 0.15  # Freeze cursor 150ms after blink ends
+        # Sensitivity
+        self.sensitivity_x = 6.5
+        self.sensitivity_y = 9.0
+        self.head_weight = 0.55
+        self.iris_weight = 0.45
+        self.head_weight_vertical = 0.65
+        # Non-linear amplification
+        self.amplification_power = 1.5
+        self.min_amplification = 1.0
+        self.max_amplification = 2.2
+        # Velocity prediction (reduced to improve stability)
+        self.velocity_weight = 0.15
+        self.velocity_smoothing = 0.2
+        # Dead zone - ignore tiny movements
+        self.dead_zone = 0.008
+        # Face tracking recovery
+        self._frames_without_face = 0
+        self._max_frames_without_face = 10
 
         self._cursor = CursorController()
         self._last_move_ts = 0.0
         self._last_click_ts = 0.0
         self._blink_start = None
+        self._blink_end_ts = None  # Track when blink ended for freeze period
         self._smoothed_x = None
         self._smoothed_y = None
+        self._frozen_x = None  # Position to hold during blink
+        self._frozen_y = None
         self._pending_short_blink_ts = None
+        self._blink_count = 0
         self._neutral_nx = None
         self._neutral_ny = None
         self._neutral_drift = 0.0
         self._is_blinking = False
-        self._calibration_frames = 60
+        self._calibration_frames = 45
         self._frame_calibration_count = 0
         self._neutral_head_x = None
         self._neutral_head_y = None
+        # Velocity tracking
+        self._prev_nx = None
+        self._prev_ny = None
+        self._velocity_x = 0.0
+        self._velocity_y = 0.0
+        self._last_gaze_time = None
+        # Stability: track last valid gaze for continuity
+        self._last_valid_nx = 0.5
+        self._last_valid_ny = 0.5
+        
+        # Shared multiprocessing values for overlay feedback
+        self._shared_x = shared_x
+        self._shared_y = shared_y
+        self._shared_click_state = shared_click_state
+        
+        # Initialize CLAHE for adaptive lighting enhancement
+        self._clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
     def run(self, stop_event):
         cv2.setNumThreads(1)
@@ -70,9 +108,9 @@ class EyeTracker:
             face_mesh = mp.solutions.face_mesh.FaceMesh(
                 static_image_mode=False,
                 max_num_faces=1,
-                refine_landmarks=False,
-                min_detection_confidence=0.4,
-                min_tracking_confidence=0.4,
+                refine_landmarks=True,  # Enable iris tracking landmarks
+                min_detection_confidence=0.3,  # Lower threshold for better detection
+                min_tracking_confidence=0.3,
             )
         else:
             face_landmarker = self._create_face_landmarker()
@@ -93,21 +131,42 @@ class EyeTracker:
                     self._sleep_if_needed(loop_start, desired_dt)
                     continue
 
-                frame = cv2.convertScaleAbs(frame, alpha=1.2, beta=18)
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                # Adaptive lighting enhancement using LAB color space + CLAHE
+                # This works much better than static brightness/contrast across different lighting conditions
+                lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+                l, a, b = cv2.split(lab)
+                cl = self._clahe.apply(l)
+                limg = cv2.merge((cl, a, b))
+                # Convert back to RGB for MediaPipe (MediaPipe expects RGB)
+                final_img = cv2.cvtColor(limg, cv2.COLOR_LAB2RGB)
+                
+                face_detected = False
                 if HAS_SOLUTIONS:
-                    results = face_mesh.process(rgb)
+                    results = face_mesh.process(final_img)
                     if results.multi_face_landmarks:
                         landmarks = results.multi_face_landmarks[0].landmark
-                        self._update_cursor(landmarks)
+                        # IMPORTANT: Check blink FIRST before updating cursor
                         self._update_blink(landmarks)
+                        self._update_cursor(landmarks)
+                        face_detected = True
+                        self._frames_without_face = 0
                 else:
-                    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+                    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=final_img)
                     result = face_landmarker.detect(mp_image)
                     if result.face_landmarks:
                         landmarks = result.face_landmarks[0]
-                        self._update_cursor(landmarks)
+                        # IMPORTANT: Check blink FIRST before updating cursor
                         self._update_blink(landmarks)
+                        self._update_cursor(landmarks)
+                        face_detected = True
+                        self._frames_without_face = 0
+                
+                if not face_detected:
+                    self._frames_without_face += 1
+                    # Reset blink state if face lost for too long
+                    if self._frames_without_face > self._max_frames_without_face:
+                        self._is_blinking = False
+                        self._blink_start = None
 
                 self._sleep_if_needed(loop_start, desired_dt)
         finally:
@@ -118,10 +177,39 @@ class EyeTracker:
             cap.release()
 
     def _update_cursor(self, landmarks):
+        now = time.time()
+        
+        # Check if we're in blink freeze period (during blink OR shortly after)
+        in_freeze_period = False
         if self._is_blinking:
+            in_freeze_period = True
+            # Save current position to freeze at
+            if self._frozen_x is None and self._smoothed_x is not None:
+                self._frozen_x = self._smoothed_x
+                self._frozen_y = self._smoothed_y
+        elif self._blink_end_ts is not None:
+            # Still in post-blink freeze period
+            if now - self._blink_end_ts < self.blink_freeze_duration:
+                in_freeze_period = True
+            else:
+                # Freeze period ended, clear frozen position
+                self._blink_end_ts = None
+                self._frozen_x = None
+                self._frozen_y = None
+        
+        # Update shared state regarding freeze
+        if self._shared_click_state and in_freeze_period:
+            self._shared_click_state.value = 3
+
+        # During freeze, don't update cursor at all
+        if in_freeze_period:
             return
 
         nx, ny = self._gaze_from_landmarks(landmarks)
+        
+        # Store last valid gaze
+        self._last_valid_nx = nx
+        self._last_valid_ny = ny
 
         screen_w, screen_h = self._cursor.screen_size
         target_x = nx * screen_w
@@ -134,10 +222,15 @@ class EyeTracker:
             self._smoothed_x = self.smoothing * target_x + (1 - self.smoothing) * self._smoothed_x
             self._smoothed_y = self.smoothing * target_y + (1 - self.smoothing) * self._smoothed_y
 
-        now = time.time()
         if now - self._last_move_ts >= self.cursor_update_interval:
             self._cursor.move(self._smoothed_x, self._smoothed_y)
             self._last_move_ts = now
+            
+            # Update shared state for overlay
+            if self._shared_x: self._shared_x.value = self._smoothed_x / screen_w if screen_w > 0 else 0.5
+            if self._shared_y: self._shared_y.value = self._smoothed_y / screen_h if screen_h > 0 else 0.5
+            if self._shared_click_state: 
+                self._shared_click_state.value = 0
 
     def _update_blink(self, landmarks):
         ear_left = self._eye_aspect_ratio(landmarks, LEFT_EYE)
@@ -145,30 +238,60 @@ class EyeTracker:
         ear = (ear_left + ear_right) * 0.5
 
         now = time.time()
+        
+        # Reset pending blink if window expired
         if self._pending_short_blink_ts and now - self._pending_short_blink_ts > self.double_blink_window:
             self._pending_short_blink_ts = None
+            self._blink_count = 0
 
+        # Detect blink state
         if ear < self.blink_threshold:
-            self._is_blinking = True
-            if self._blink_start is None:
+            # Eyes closing/closed
+            if not self._is_blinking:
+                # Just started blinking
+                self._is_blinking = True
                 self._blink_start = now
         else:
-            self._is_blinking = False
-            if self._blink_start is not None:
-                duration = now - self._blink_start
-                self._blink_start = None
-                if now - self._last_click_ts >= self.click_debounce:
+            # Eyes open
+            if self._is_blinking:
+                # Blink just ended
+                self._is_blinking = False
+                self._blink_end_ts = now  # Start freeze period
+                
+                if self._blink_start is not None:
+                    duration = now - self._blink_start
+                    self._blink_start = None
+                    
+                    # Process blink action
                     if duration >= self.short_blink_min:
                         if duration >= self.long_blink_threshold:
-                            self._cursor.right_click()
+                            # Long blink = right click
+                            if now - self._last_click_ts >= self.click_debounce:
+                                self._cursor.right_click()
+                                self._last_click_ts = now
+                                if self._shared_click_state: self._shared_click_state.value = 2  # Right click feedback
                             self._pending_short_blink_ts = None
+                            self._blink_count = 0
                         else:
-                            if self._pending_short_blink_ts and now - self._pending_short_blink_ts <= self.double_blink_window:
-                                self._cursor.left_click()
-                                self._pending_short_blink_ts = None
+                            # Short blink - check for double blink
+                            if self._pending_short_blink_ts is not None:
+                                time_since_first = now - self._pending_short_blink_ts
+                                if time_since_first <= self.double_blink_window:
+                                    # Double blink = left click!
+                                    if now - self._last_click_ts >= self.click_debounce:
+                                        self._cursor.left_click()
+                                        self._last_click_ts = now
+                                        if self._shared_click_state: self._shared_click_state.value = 1  # Left click feedback
+                                    self._pending_short_blink_ts = None
+                                    self._blink_count = 0
+                                else:
+                                    # Too slow, treat as new first blink
+                                    self._pending_short_blink_ts = now
+                                    self._blink_count = 1
                             else:
+                                # First blink, wait for second
                                 self._pending_short_blink_ts = now
-                        self._last_click_ts = now
+                                self._blink_count = 1
 
     def _create_face_landmarker(self):
         model_path = self._ensure_model()
@@ -232,11 +355,55 @@ class EyeTracker:
         delta_head_x = head_x - self._neutral_head_x
         delta_head_y = head_y - self._neutral_head_y
 
-        combined_x = self.iris_weight * delta_iris_x + self.head_weight * delta_head_x
-        combined_y = self.iris_weight * delta_iris_y + self.head_weight * delta_head_y
+        # Apply dead zone to filter micro-movements
+        if abs(delta_iris_x) < self.dead_zone:
+            delta_iris_x = 0
+        if abs(delta_iris_y) < self.dead_zone:
+            delta_iris_y = 0
+        if abs(delta_head_x) < self.dead_zone:
+            delta_head_x = 0
+        if abs(delta_head_y) < self.dead_zone:
+            delta_head_y = 0
 
-        nx = 0.5 - combined_x * self.sensitivity_x
-        ny = 0.5 + combined_y * self.sensitivity_y
+        # Horizontal: balanced iris + head
+        combined_x = self.iris_weight * delta_iris_x + self.head_weight * delta_head_x
+        # Vertical: stronger head influence (nodding is more natural for vertical)
+        combined_y = self.iris_weight * delta_iris_y + self.head_weight_vertical * delta_head_y
+
+        # Non-linear amplification - separate for X and Y
+        dist_x = abs(combined_x)
+        dist_y = abs(combined_y)
+        
+        # Amplification based on distance from center
+        amp_x = self.min_amplification + (self.max_amplification - self.min_amplification) * min(1.0, dist_x * 5) ** self.amplification_power
+        amp_y = self.min_amplification + (self.max_amplification - self.min_amplification) * min(1.0, dist_y * 6) ** self.amplification_power
+        
+        combined_x *= amp_x
+        combined_y *= amp_y
+
+        # Calculate base position
+        base_nx = 0.5 - combined_x * self.sensitivity_x
+        base_ny = 0.5 + combined_y * self.sensitivity_y
+
+        # Velocity prediction - anticipate where eye is moving
+        now = time.time()
+        if self._prev_nx is not None and self._last_gaze_time is not None:
+            dt = now - self._last_gaze_time
+            if dt > 0 and dt < 0.1:  # Only predict if reasonable time delta
+                instant_vx = (base_nx - self._prev_nx) / dt
+                instant_vy = (base_ny - self._prev_ny) / dt
+                # Smooth velocity
+                self._velocity_x = self.velocity_smoothing * instant_vx + (1 - self.velocity_smoothing) * self._velocity_x
+                self._velocity_y = self.velocity_smoothing * instant_vy + (1 - self.velocity_smoothing) * self._velocity_y
+        
+        self._prev_nx = base_nx
+        self._prev_ny = base_ny
+        self._last_gaze_time = now
+
+        # Apply velocity prediction to anticipate movement
+        predicted_offset = 0.016  # Predict ~16ms ahead
+        nx = base_nx + self._velocity_x * predicted_offset * self.velocity_weight
+        ny = base_ny + self._velocity_y * predicted_offset * self.velocity_weight
 
         nx = max(0.0, min(1.0, nx))
         ny = max(0.0, min(1.0, ny))

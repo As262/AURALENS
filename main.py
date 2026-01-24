@@ -7,8 +7,8 @@ from eye_tracking import EyeTracker
 from aura_overlay import run as run_aura
 
 
-def _run_eye(stop_event):
-    EyeTracker().run(stop_event)
+def _run_eye(stop_event, gaze_x, gaze_y, click_state):
+    EyeTracker(gaze_x, gaze_y, click_state).run(stop_event)
 
 
 def main():
@@ -21,15 +21,21 @@ def main():
     run_overlay = args.overlay or (not args.eye and not args.overlay)
 
     stop_event = mp.Event()
+    # Shared values for gaze visualization: x, y (0.0-1.0), and click state
+    # click_state: 0=none, 1=left, 2=right, 3=blink_freeze
+    gaze_x = mp.Value('d', 0.5)
+    gaze_y = mp.Value('d', 0.5)
+    click_state = mp.Value('i', 0)
+    
     processes = []
 
     if run_eye:
-        p_eye = mp.Process(target=_run_eye, args=(stop_event,), name="eye-tracking")
+        p_eye = mp.Process(target=_run_eye, args=(stop_event, gaze_x, gaze_y, click_state), name="eye-tracking")
         p_eye.start()
         processes.append(p_eye)
 
     if run_overlay:
-        p_overlay = mp.Process(target=run_aura, args=(stop_event,), name="aura-overlay")
+        p_overlay = mp.Process(target=run_aura, args=(stop_event, gaze_x, gaze_y, click_state), name="aura-overlay")
         p_overlay.start()
         processes.append(p_overlay)
 
