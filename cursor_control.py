@@ -1,6 +1,8 @@
 import ctypes
 from ctypes import wintypes
 
+from utils import enable_dpi_awareness
+
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 
 MOUSEEVENTF_LEFTDOWN = 0x0002
@@ -11,6 +13,9 @@ MOUSEEVENTF_RIGHTUP = 0x0010
 
 class CursorController:
     def __init__(self):
+        # Ensure metrics + SetCursorPos share the physical-pixel space that the
+        # overlay and calibration use. Harmless if already set by the process.
+        enable_dpi_awareness()
         self._screen_w = user32.GetSystemMetrics(0)
         self._screen_h = user32.GetSystemMetrics(1)
 
