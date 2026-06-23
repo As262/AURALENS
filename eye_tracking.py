@@ -39,6 +39,11 @@ class EyeTracker:
         self.min_amplification = 1.0
         self.max_amplification = 2.2
         self.dead_zone = 0.008
+        # Dwell-to-click
+        self.dwell_radius = 0.04          # normalised; gaze must stay within this
+        self._dwell_anchor = None         # (fx, fy) the dwell is centred on
+        self._dwell_start = None
+        self._dwell_armed = True          # re-arms after gaze leaves the radius
         # Face tracking recovery
         self._frames_without_face = 0
         self._max_frames_without_face = 10
@@ -78,9 +83,13 @@ class EyeTracker:
             self._tracking_enabled = shared.tracking_enabled
             self._sens_x_val = shared.sensitivity_x
             self._sens_y_val = shared.sensitivity_y
+            self._dwell_enabled = shared.dwell_enabled
+            self._dwell_time = shared.dwell_time
+            self._dwell_progress = shared.dwell_progress
         else:
             self._shared_x = self._shared_y = self._shared_click_state = None
             self._tracking_enabled = self._sens_x_val = self._sens_y_val = None
+            self._dwell_enabled = self._dwell_time = self._dwell_progress = None
 
     def run(self, stop_event):
         enable_dpi_awareness()
@@ -160,10 +169,12 @@ class EyeTracker:
             else:
                 self._blink_end_ts = None
                 self._filter.reset()  # re-seed cleanly after the blink
+                self._reset_dwell()   # restart dwell after a blink
 
         if in_freeze:
             if self._shared_click_state:
                 self._shared_click_state.value = 3
+            self._reset_dwell()
             return
 
         nx, ny = self._gaze(ix, iy, hx, hy)
@@ -177,8 +188,53 @@ class EyeTracker:
                 self._shared_x.value = fx
             if self._shared_y:
                 self._shared_y.value = fy
-            if self._shared_click_state:
+            # Clear the freeze indicator (3) on resume, but don't stomp a fresh
+            # click flash (1/2) that the overlay hasn't displayed yet - it
+            # resets that itself after showing it.
+            if self._shared_click_state and self._shared_click_state.value not in (1, 2):
                 self._shared_click_state.value = 0
+
+        self._update_dwell(fx, fy, now)
+
+    def _reset_dwell(self):
+        self._dwell_anchor = None
+        self._dwell_start = None
+        self._dwell_armed = True
+        if self._dwell_progress is not None and self._dwell_progress.value != 0.0:
+            self._dwell_progress.value = 0.0
+
+    def _update_dwell(self, fx, fy, now):
+        if self._dwell_enabled is None or not self._dwell_enabled.value:
+            self._reset_dwell()
+            return
+
+        dwell_time = self._dwell_time.value if self._dwell_time else 1.0
+        if self._dwell_anchor is None:
+            self._dwell_anchor = (fx, fy)
+            self._dwell_start = now
+            progress = 0.0
+        else:
+            dx = fx - self._dwell_anchor[0]
+            dy = fy - self._dwell_anchor[1]
+            if (dx * dx + dy * dy) ** 0.5 > self.dwell_radius:
+                # Gaze left the dwell zone -> re-anchor and re-arm
+                self._dwell_anchor = (fx, fy)
+                self._dwell_start = now
+                self._dwell_armed = True
+                progress = 0.0
+            else:
+                elapsed = now - self._dwell_start
+                progress = min(1.0, elapsed / dwell_time) if dwell_time > 0 else 1.0
+                if self._dwell_armed and progress >= 1.0:
+                    if now - self._last_click_ts >= self.click_debounce:
+                        self._cursor.left_click()
+                        if self._shared_click_state:
+                            self._shared_click_state.value = 1
+                        self._last_click_ts = now
+                    self._dwell_armed = False  # must leave the zone to re-arm
+
+        if self._dwell_progress is not None:
+            self._dwell_progress.value = progress
 
     def _gaze(self, ix, iy, hx, hy):
         if self._calibration is not None:

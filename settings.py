@@ -28,6 +28,9 @@ def run(shared):
 
     def persist():
         config.pull_from_shared(shared, cfg)
+        # Re-read the calibration block from disk so a slider save can't clobber
+        # a model that was just fitted (e.g. via this window's Recalibrate).
+        cfg["calibration"] = config.load().get("calibration")
         config.save(cfg)
 
     def header(text):
@@ -138,6 +141,28 @@ def run(shared):
                lambda: shared.sensitivity_y.value,
                lambda v: setattr(shared.sensitivity_y, "value", v),
                fmt="{:.1f}")
+
+    # ---- Clicking ---------------------------------------------------------
+    header("Clicking")
+    tk.Label(root, text="Blink clicks always work: double-blink = left, "
+                        "long blink = right.", bg=BG, fg=SUB,
+             font=("Segoe UI", 8)).pack(anchor="w", padx=16)
+
+    dwell_var = tk.IntVar(value=int(shared.dwell_enabled.value))
+
+    def toggle_dwell():
+        shared.dwell_enabled.value = int(dwell_var.get())
+        persist()
+
+    tk.Checkbutton(root, text="Dwell click (hold gaze still to click)",
+                   variable=dwell_var, command=toggle_dwell, bg=BG, fg=FG,
+                   selectcolor=BG, activebackground=BG, activeforeground=FG,
+                   font=("Segoe UI", 10)).pack(anchor="w", padx=14)
+
+    make_scale("Dwell time", 0.5, 2.5, 0.1,
+               lambda: shared.dwell_time.value,
+               lambda v: setattr(shared.dwell_time, "value", v),
+               fmt="{:.1f}s")
 
     # ---- Actions ----------------------------------------------------------
     status = tk.Label(root, text="", bg=BG, fg=ACCENT, font=("Segoe UI", 9))

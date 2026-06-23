@@ -7,6 +7,7 @@ multi-second, multi-hundred-MB import cost when spawn re-imports their module.
 Both the live tracker and the calibration step go through this module so their
 features come from identically-preprocessed frames.
 """
+import time
 import urllib.request
 from pathlib import Path
 
@@ -54,8 +55,10 @@ class FaceProcessor:
         self._has_solutions = hasattr(mp, "solutions")
         self._face_mesh = None
         self._landmarker = None
+        self._last_ts = -1   # monotonic timestamp guard for VIDEO mode
 
         if self._has_solutions:
+            # solutions FaceMesh already does temporal tracking via process()
             self._face_mesh = mp.solutions.face_mesh.FaceMesh(
                 static_image_mode=False,
                 max_num_faces=1,
@@ -69,11 +72,22 @@ class FaceProcessor:
             base_options = mp_python.BaseOptions(model_asset_path=str(_ensure_model()))
             options = vision.FaceLandmarkerOptions(
                 base_options=base_options,
+                running_mode=vision.RunningMode.VIDEO,   # temporal tracking
                 output_face_blendshapes=False,
                 output_facial_transformation_matrixes=False,
                 num_faces=1,
+                min_face_detection_confidence=0.3,
+                min_tracking_confidence=0.3,
             )
             self._landmarker = vision.FaceLandmarker.create_from_options(options)
+
+    def _next_ts(self):
+        # VIDEO mode requires strictly increasing timestamps (ms).
+        ts = int(time.monotonic() * 1000)
+        if ts <= self._last_ts:
+            ts = self._last_ts + 1
+        self._last_ts = ts
+        return ts
 
     def process(self, rgb_image):
         if self._has_solutions:
@@ -83,7 +97,7 @@ class FaceProcessor:
             return None
         mp = self._mp
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_image)
-        result = self._landmarker.detect(mp_image)
+        result = self._landmarker.detect_for_video(mp_image, self._next_ts())
         if result.face_landmarks:
             return result.face_landmarks[0]
         return None

@@ -8,8 +8,10 @@ Two separate click-through, topmost, layered windows under one hidden Tk root:
   light so a bright full panel never washes it out.
 
 tkinter only offers ONE window-level alpha and ONE transparent colour, hence the
-split. The transparent colour is a magenta sentinel that the warm Kelvin ramp
-never produces (its green channel is always well above 0).
+split. The transparent colour is pure black: the only Windows colour key that
+reliably composites to the desktop on this hardware. Nothing we draw is pure
+black - the warm Kelvin ramp and the glow bands (which floor at 45% brightness)
+stay well clear of (0,0,0) - so nothing we want visible gets keyed out.
 """
 import ctypes
 import tkinter as tk
@@ -21,7 +23,7 @@ WS_EX_LAYERED = 0x00080000
 WS_EX_TRANSPARENT = 0x00000020
 WS_EX_TOPMOST = 0x00000008
 
-SENTINEL = "#fe00fe"          # transparent / click-through colour
+SENTINEL = "#000000"          # transparent / click-through colour key (black)
 BORDER_THICKNESS = 70
 BORDER_BANDS = 6
 
@@ -78,6 +80,9 @@ def run(stop_event, shared):
                                            max(0.0, min(1.0, shared.overlay_opacity.value)))
 
     cursor_radius = 20
+    dwell_ring = fb_canvas.create_arc(-100, -100, -50, -50, start=90, extent=0,
+                                      style="arc", outline="#00E5FF", width=4,
+                                      state="hidden")
     gaze_cursor = fb_canvas.create_oval(-100, -100, -50, -50, fill="#00FF00",
                                         outline="white", width=2)
     status_text = fb_canvas.create_text(screen_w // 2, screen_h - 15, text="",
@@ -110,6 +115,7 @@ def run(stop_event, shared):
         # process) fullscreen calibration window.
         if shared.calibrating.value:
             fb_canvas.coords(gaze_cursor, -100, -100, -50, -50)
+            fb_canvas.itemconfig(dwell_ring, state="hidden")
             fb_canvas.itemconfig(status_text, text="")
             root.after(16, _update)
             return
@@ -122,6 +128,15 @@ def run(stop_event, shared):
         sy = int(gy * screen_h)
         fb_canvas.coords(gaze_cursor, sx - cursor_radius, sy - cursor_radius,
                          sx + cursor_radius, sy + cursor_radius)
+
+        # Dwell progress ring around the cursor
+        dp = shared.dwell_progress.value
+        if dp > 0.02:
+            rr = cursor_radius + 8
+            fb_canvas.coords(dwell_ring, sx - rr, sy - rr, sx + rr, sy + rr)
+            fb_canvas.itemconfig(dwell_ring, extent=-359.999 * dp, state="normal")
+        else:
+            fb_canvas.itemconfig(dwell_ring, state="hidden")
 
         click = shared.click_state.value
         if click == 1:

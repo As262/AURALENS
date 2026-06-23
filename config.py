@@ -22,9 +22,11 @@ DEFAULTS = {
     "overlay_opacity": 0.85,   # feedback (gaze cursor) window alpha
     "sensitivity_x": 6.5,      # heuristic-fallback sensitivity only
     "sensitivity_y": 9.0,
+    "dwell_enabled": 0,        # dwell-to-click (hold gaze still to click)
+    "dwell_time": 1.0,         # seconds of holding still before a click
 }
 
-_INT_KEYS = ("tracking_enabled", "light_on", "light_mode")
+_INT_KEYS = ("tracking_enabled", "light_on", "light_mode", "dwell_enabled")
 
 
 def load():
@@ -73,6 +75,11 @@ class SharedState:
         self.sensitivity_x = mp.Value('d', 6.5)
         self.sensitivity_y = mp.Value('d', 9.0)
 
+        # Dwell-to-click
+        self.dwell_enabled = mp.Value('i', 0)
+        self.dwell_time = mp.Value('d', 1.0)
+        self.dwell_progress = mp.Value('d', 0.0)   # runtime only (eye -> overlay)
+
         # Settings -> tray request flag (watched by the tray)
         self.recalibrate_request = mp.Value('i', 0)
         # Set by the tray while the calibration window is up, so the overlay
@@ -90,6 +97,8 @@ def push_to_shared(cfg, shared):
     shared.overlay_opacity.value = float(cfg["overlay_opacity"])
     shared.sensitivity_x.value = float(cfg["sensitivity_x"])
     shared.sensitivity_y.value = float(cfg["sensitivity_y"])
+    shared.dwell_enabled.value = int(cfg["dwell_enabled"])
+    shared.dwell_time.value = float(cfg["dwell_time"])
 
 
 def pull_from_shared(shared, cfg):
@@ -103,4 +112,6 @@ def pull_from_shared(shared, cfg):
     cfg["overlay_opacity"] = float(shared.overlay_opacity.value)
     cfg["sensitivity_x"] = float(shared.sensitivity_x.value)
     cfg["sensitivity_y"] = float(shared.sensitivity_y.value)
+    cfg["dwell_enabled"] = int(shared.dwell_enabled.value)
+    cfg["dwell_time"] = float(shared.dwell_time.value)
     return cfg

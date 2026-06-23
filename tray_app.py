@@ -105,6 +105,9 @@ class TrayApp:
     # ---- persistence -------------------------------------------------- #
     def _persist(self):
         config.pull_from_shared(self.shared, self.cfg)
+        # Don't let a scalar toggle clobber a calibration model written on disk
+        # by the calibration process.
+        self.cfg["calibration"] = config.load().get("calibration")
         config.save(self.cfg)
 
     # ---- menu actions ------------------------------------------------- #
@@ -118,6 +121,10 @@ class TrayApp:
 
     def on_toggle_full(self, icon, item):
         self.shared.light_mode.value = 0 if self.shared.light_mode.value else 1
+        self._persist()
+
+    def on_toggle_dwell(self, icon, item):
+        self.shared.dwell_enabled.value = 0 if self.shared.dwell_enabled.value else 1
         self._persist()
 
     def on_settings(self, icon, item):
@@ -202,6 +209,8 @@ class TrayApp:
                  checked=lambda i: bool(self.shared.light_on.value)),
             item("Full-panel Light", self.on_toggle_full,
                  checked=lambda i: bool(self.shared.light_mode.value)),
+            item("Dwell Click", self.on_toggle_dwell,
+                 checked=lambda i: bool(self.shared.dwell_enabled.value)),
             Menu.SEPARATOR,
             item("Settings…", self.on_settings),
             item("Recalibrate", self.on_recalibrate),
