@@ -17,7 +17,7 @@ DEFAULTS = {
     "tracking_enabled": 1,     # int flag
     "light_on": 0,             # int flag
     "light_mode": 0,           # 0 = glow border, 1 = full panel
-    "brightness": 0.6,         # 0.0 - 1.0 (light window alpha)
+    "brightness": 0.85,        # 0.0 - 1.0 (key-light intensity)
     "temp_k": 4500.0,          # 2000 - 6500 Kelvin
     "overlay_opacity": 0.85,   # feedback (gaze cursor) window alpha
     "sensitivity_x": 6.5,      # heuristic-fallback sensitivity only
@@ -69,7 +69,7 @@ class SharedState:
         self.tracking_enabled = mp.Value('i', 1)
         self.light_on = mp.Value('i', 0)
         self.light_mode = mp.Value('i', 0)
-        self.brightness = mp.Value('d', 0.6)
+        self.brightness = mp.Value('d', 0.85)
         self.temp_k = mp.Value('d', 4500.0)
         self.overlay_opacity = mp.Value('d', 0.85)
         self.sensitivity_x = mp.Value('d', 6.5)
