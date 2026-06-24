@@ -1,0 +1,13 @@
+{
+  "tracking_enabled": 1,
+  "light_on": 1,
+  "light_mode": 0,
+  "brightness": 0.85,
+  "temp_k": 4500.0,
+  "overlay_opacity": 0.85,
+  "sensitivity_x": 6.5,
+  "sensitivity_y": 9.0,
+  "dwell_enabled": 0,
+  "dwell_time": 1.0,
+  "calibration": null
+}
